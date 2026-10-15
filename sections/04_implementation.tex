@@ -1,0 +1,55 @@
+\section{Implementation}
+\label{sec:implementation}
+
+BASE is implemented as a Zephyr driver class with inline dispatch through per-device operation tables. Kconfig and devicetree select and configure the ZFM-X0, GT-5X, and AI10 drivers, each using a separately configured UART. Table~\ref{tab:protocol_comparison} summarizes their contract mappings. Features are determined by implemented handlers, not by module protocol support alone.
+
+\begin{table*}[!t]
+\centering
+\caption{Device-specific realizations of the BASE contract.}
+\label{tab:protocol_comparison}
+\small
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\textwidth}{|>{\raggedright\arraybackslash}p{0.12\textwidth}|>{\raggedright\arraybackslash}X|>{\raggedright\arraybackslash}X|>{\raggedright\arraybackslash}X|}
+\hline
+\textbf{Concern} & \textbf{ZFM-X0} & \textbf{GT-5X} & \textbf{AI10} \\ \hline
+Enrollment & Fingerprint; two staged captures & Fingerprint; three staged captures & Face/palm; device-managed, automatic identifier \\ \hline
+Storage & Finalization creates and stores template & Third capture stores; finalization closes host session & Storage precedes successful enrollment reply \\ \hline
+Matching & Synchronous identification and verification & Synchronous identification and verification & Synchronous/asynchronous identification; no verification \\ \hline
+Execution & Calling thread; interrupt-driven UART TX/RX & Calling thread; interrupt-driven UART TX/RX & Calling thread or dedicated worker; interrupt RX, polled TX \\ \hline
+Allocation & Fixed packet buffers & Persistent template buffer and temporary heap packets & Fixed receive/packet buffers and worker stack \\ \hline
+\end{tabularx}
+\end{table*}
+
+\subsection{Fingerprint Drivers}
+
+ZFM-X0 and GT-5X use mutex-protected operations and semaphore waits for UART completion. ZFM-X0 sleeps between unsuccessful finger-acquisition checks; synchronous calls therefore do not imply continuous CPU occupation.
+
+ZFM-X0 enrollment converts two captures into feature buffers before finalization creates and stores the template. GT-5X sends a command at each enrollment stage; its first two stages include finger-removal checks whose failure does not undo an accepted stage. GT-5X finalization resets host state and attempts an inventory-count refresh, returning success even if that refresh fails. It performs no storage command.
+
+GT-5X maps public one-based identifiers to module indices and supports template transfers; ZFM-X0 does not expose transfer handlers. GT-5X inventory scans propagate unexpected slot errors rather than reporting a partial scan as valid. Applications serialize complete staged sessions beyond the drivers' per-call locking.
+
+\subsection{AI10 Execution and Quiescence}
+
+AI10 maps identifiers 1--1000 to face and 1001--2000 to palm. Its protocol command named \texttt{VERIFY} performs identification; BASE verification requests are rejected.
+
+UART RX interrupts enqueue bytes in a 1024-byte ring, signal a receive semaphore, and flag overflow. An accepted asynchronous start records operation state and wakes a dedicated worker. The worker performs protocol reset, identification or enrollment, and cleanup. Parsing and callbacks execute in thread context; synchronous operations execute in the caller.
+
+A control mutex serializes entry, while activity state retains device reservation after asynchronous start returns. Conflicting operations return \texttt{-EBUSY}; control entry from the worker or interrupt context returns \texttt{-EWOULDBLOCK}. Short spinlocked regions protect receive and lifecycle state.
+
+Stop sets cancellation, wakes receive waits, and waits for completion. Reset exchanges remain non-cancellable to re-establish protocol boundaries. A common worker epilogue performs cleanup, emits any required \texttt{ERROR}, and invokes \texttt{STOPPED}. Only after that callback returns does it clear activity and signal completion. Stop returns the cleanup result. This ordering implements the quiescence obligation in Section~\ref{sec:correctness_properties}; callback execution contributes to stop latency and worker stack usage.
+
+\subsection{Validation, Timing, and Resource Costs}
+
+Drivers validate reply framing and checksums. AI10 additionally bounds payloads and validates command-specific reply lengths and inventory identifiers. These checks provide protocol validation, not authenticated transport.
+
+AI10 accepts finite operation timeouts up to 255~s, rounded upward to seconds, and rejects \texttt{K\_NO\_WAIT} and \texttt{K\_FOREVER}. Fingerprint acquisition interprets \texttt{K\_FOREVER} as the configured default timeout. Transport, locking, cleanup, and finger-removal waits can extend total call duration beyond acquisition timeouts.
+
+ZFM-X0 can filter successful matches using a host-side score threshold. Its security setting $s\in\{1,\ldots,10\}$ maps to device level $\lceil s/2\rceil$, with the getter returning twice that level. Unsupported attributes are rejected; these mappings do not calibrate security across modules.
+
+ZFM-X0 embeds fixed packet buffers. GT-5X allocates a persistent template buffer and temporary protocol packets, so instance size alone omits part of its memory demand. AI10 creates its worker and reserves its stack even for synchronous-only use. Section~\ref{sec:evaluation} distinguishes linked-image increments, heap allocation requests, and observed stack watermarks.
+
+\subsection{Availability and Scope}
+\label{sec:availability}
+
+The core biometric driver class and API are integrated into Zephyr mainline~\cite{zephyr_biometrics}. The evaluated multimodal and asynchronous extensions are provided in upstream pull request~\cite{zephyr_pr2}. The evaluation artifact records source hashes, configurations, and build revisions identifying the tested implementation.

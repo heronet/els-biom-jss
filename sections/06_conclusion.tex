@@ -1,0 +1,18 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+BASE provides a unified biometric driver class combining capability discovery, typed operations and results, and explicit lifecycle rules. Its Zephyr implementation supports shared application workflows across staged fingerprint and device-managed face/palm modules while preserving distinctions between enrollment control, device persistence, and host-side operation lifetime.
+
+One application reused coordination logic across three
+device families. Directed AI10 tests supported the specified
+termination, exclusion, and quiescence obligations for the
+exercised schedules. Scheduling and resource measurements
+showed that integration costs depend on driver execution
+and allocation choices, including callback duration and
+worker storage retained during synchronous use.
+
+The resulting abstraction supports shared workflows while
+keeping device-specific effects and application ownership
+responsibilities explicit. Further work should examine
+completion/cancellation races, uncertain-storage recovery,
+successful-acquisition workloads, and transfer to other RTOSs.

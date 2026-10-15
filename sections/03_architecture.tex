@@ -1,0 +1,265 @@
+\section{The BASE Architecture}
+\label{sec:architecture}
+
+BASE defines common biometric operations while preserving differences in acquisition ownership, storage, and execution. Applications select capability-dependent workflows; drivers translate requests and enforce the shared behavioral contract.
+
+\subsection{Three-Plane Architecture and Responsibilities}
+
+Figure~\ref{fig:architecture} separates three responsibilities. The \textbf{application plane} selects workflows, coordinates device ownership, and applies policy. Template identifiers refer to device-local records; associating them with users or authorization decisions remains an application task.
+
+The \textbf{subsystem contract plane} defines operations, typed results, optional-handler checks, and lifecycle obligations. Zephyr's \texttt{biometric\_\allowbreak{}driver\_\allowbreak{}api} binds handlers to device instances for inline dispatch.
+
+The \textbf{driver implementation plane} translates commands and responses and coordinates protocol and device state. Enforcement resides here because acquisition recovery, storage transitions, and cleanup depend on device protocols. Drivers can use different execution mechanisms while satisfying the same externally observable obligations.
+
+This flexibility requires repeated admission and completion bookkeeping and validation of each driver's conformance. Shared helpers could centralize that bookkeeping while retaining protocol-specific transitions. BASE currently uses driver-local enforcement; the evaluation characterizes its costs without comparing it with centralized enforcement.
+
+\begin{figure}
+\centering
+\definecolor{baseGray}{HTML}{666666}
+\definecolor{baseBlue}{HTML}{0072B2}
+\definecolor{baseOrange}{HTML}{D55E00}
+\begin{tikzpicture}[
+    x=\columnwidth,y=1cm,
+    font=\sffamily\footnotesize,
+    box/.style={draw=baseGray,rounded corners=1.5pt,align=center,line width=0.6pt,inner sep=3pt},
+    call/.style={-{Stealth[length=1.5mm]},draw=black!75,line width=0.65pt,shorten <=1pt,shorten >=1pt},
+    reply/.style={call,dashed},
+    lab/.style={font=\sffamily\footnotesize,fill=white,inner sep=1.5pt}
+]
+\node[box,fill=baseGray!7,text width=0.90\columnwidth,minimum height=1.05cm] (app) at (0,0) {\textbf{Application plane}\\Discover capabilities; select workflows;\\apply policy; consume outcomes};
+\node[box,draw=baseBlue,fill=baseBlue!8,text width=0.90\columnwidth,minimum height=1.20cm] (contract) at (0,-1.85) {\textbf{Subsystem contract plane}\\Types, operations, and API dispatch;\\optional-operation checks; lifecycle obligations};
+\draw[call] ([xshift=-0.22\columnwidth]app.south) -- node[lab,left=1pt]{requests} ([xshift=-0.22\columnwidth]contract.north);
+\draw[reply] ([xshift=0.22\columnwidth]contract.north) -- node[lab,right=1pt]{results/events} ([xshift=0.22\columnwidth]app.south);
+\draw[draw=baseOrange,fill=baseOrange!3,rounded corners=2pt,line width=0.6pt] (-0.49,-3.02) rectangle (0.49,-5.55);
+\node[box,draw=baseOrange,fill=baseOrange!8,text width=0.265\columnwidth,minimum height=1.60cm] (zfm) at (-0.325,-3.95) {\textbf{ZFM-X0}\\Fingerprint\\Staged enrollment\\Protocol/state};
+\node[box,draw=baseOrange,fill=baseOrange!8,text width=0.265\columnwidth,minimum height=1.60cm] (gt) at (0,-3.95) {\textbf{GT-5X}\\Fingerprint\\Staged enrollment\\Protocol/state};
+\node[box,draw=baseOrange,fill=baseOrange!8,text width=0.265\columnwidth,minimum height=1.60cm] (ai) at (0.325,-3.95) {\textbf{AI10}\\Face/palm\\Device-managed\\Worker/events};
+\foreach \drv in {zfm,gt,ai}{
+    \coordinate (request) at ([xshift=-2mm]\drv.north);
+    \coordinate (result) at ([xshift=2mm]\drv.north);
+    \draw[call] (contract.south -| request) -- (request);
+    \draw[reply] (result) -- (contract.south -| result);
+}
+\node[align=center,text=baseOrange!80!black,text width=0.90\columnwidth] at (0,-5.17) {\textbf{Driver implementation plane}\\Device-specific protocols and state enforcement};
+\end{tikzpicture}
+\caption{Three-plane architecture of BASE. Solid arrows denote requests; dashed arrows denote results or events. Each driver implements the shared contract for its module; protocol and state enforcement remain driver-local.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Capabilities, Operations, and Outcomes}
+
+Applications query capabilities to select supported workflows. Capabilities report modalities, storage modes, template capacity and size, staged sample count, and asynchronous operation categories. A positive sample count selects staged enrollment; zero denotes device-managed enrollment, for which asynchronous enrollment support must also be advertised.
+
+Discovery does not enumerate every attribute, matching mode, timeout range, or identifier-allocation policy. Applications therefore combine capability checks with operation errors: an absent optional handler returns \texttt{-ENOSYS}, whereas an implemented operation can reject unsupported parameters with \texttt{-ENOTSUP} or invalid arguments with \texttt{-EINVAL}.
+
+Capability queries, synchronous matching, and individual template deletion are mandatory handlers. Staged enrollment, inventory and transfer operations, bulk deletion, attributes, LED control, and asynchronous operations are optional. Advertising asynchronous operations additionally requires callback registration and stop support. Device storage does not itself imply template import/export support.
+
+Verification compares against a specified template; identification searches the database. These meanings are independent of execution mode: synchronous calls return outcomes directly, while asynchronous requests deliver events. For example, AI10 supports synchronous and asynchronous identification but rejects verification.
+
+Typed results separate matching identifiers and scores, capture progress, and enrollment outcomes. Asynchronous events carry discriminated payloads. Supported modalities describe the device; each successful result identifies its own modality. AI10 advertises face and palm and selects modality automatically during asynchronous matching.
+
+Confidence remains device-specific; match image quality uses a 0--100 representation. Zero can indicate unavailable confidence or quality, and neither field establishes cross-device calibration. Associating templates with people, combining scores, and transferring templates between incompatible formats remain outside the contract.
+
+\subsection{Enrollment Models and State Transitions}
+
+BASE exposes staged and device-managed enrollment because they assign acquisition control differently. A single whole-enrollment operation could accommodate both internally, but would remove application control over individual capture steps from the common interface. Conversely, requiring capture steps for autonomous modules would expose transitions the host cannot command. BASE therefore retains both workflows and selects between them through capabilities.
+
+Portability concerns operation meanings and workflow selection rather than identical recovery actions. Applications retain responsibility for identifier allocation, session ownership, and reconciliation after uncertain storage outcomes. Inventory operations support reconciliation where available; otherwise, the common contract cannot establish whether an interrupted exchange changed device storage. Cancellation and host-state reset consequently provide no general rollback guarantee.
+
+\subsubsection{Host-Controlled Staged Enrollment}
+
+A session begins with \texttt{biometric\_\allowbreak{}enroll\_\allowbreak{}start()}. The application collects samples through repeated calls to \texttt{biometric\_\allowbreak{}enroll\_\allowbreak{}capture()}, then calls \texttt{biometric\_\allowbreak{}enroll\_\allowbreak{}finalize()} to complete enrollment. Applications follow reported progress: ZFM-X0 requires two captures and GT-5X three. Figure~\ref{fig:fsm}(a) shows successful progression. Let $I$ denote idle and $C_k$ a session with $k$ accepted captures for a device requiring $N$ samples:
+\begin{align}
+\delta(I,\mathrm{start}_{\mathrm{ok}})&=C_0, \\
+\delta(C_k,\mathrm{capture}_{\mathrm{ok}})&=C_{k+1},\quad 0\leq k<N, \\
+\delta(C_N,\mathrm{finalize}_{\mathrm{ok}})&=I.
+\end{align}
+State $C_N$ denotes readiness for finalization. Capture is rejected in idle or ready states, and finalization before readiness. Abort resets host state where implemented.
+
+Recovery differs by driver. ZFM-X0 resets progress after acquisition or feature-conversion failure; argument and sequencing checks may reject a call without running that sequence. GT-5X preserves its stage after acquisition or enrollment-command failure. Where abort is supported, applications can abort and restart, handling an already-idle response.
+
+ZFM-X0 creates and stores the template during finalization. GT-5X stores during its third capture; finalization closes host state and attempts to refresh the enrollment count without issuing a storage command. Readiness therefore describes workflow progress, and abort cannot be assumed to undo storage (Section~\ref{sec:implementation}).
+
+\begin{figure*}[!t]
+\centering
+\definecolor{baseGray}{HTML}{666666}
+\definecolor{baseBlue}{HTML}{0072B2}
+\definecolor{baseOrange}{HTML}{D55E00}
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    x=1cm,y=1cm,font=\sffamily\small,
+    state/.style={draw=baseGray,rounded corners=2pt,align=center,line width=0.7pt,text width=3.15cm,minimum height=0.64cm,inner sep=4pt,fill=baseGray!7},
+    staged/.style={draw=baseBlue,fill=baseBlue!8},
+    managed/.style={draw=baseOrange,fill=baseOrange!8},
+    arrow/.style={-{Stealth[length=1.8mm]},line width=0.75pt,shorten <=1pt,shorten >=1pt},
+    stagedarrow/.style={arrow,draw=baseBlue},
+    managedarrow/.style={arrow,draw=baseOrange},
+    lab/.style={font=\sffamily\footnotesize,align=center,fill=white,inner sep=2pt}
+]
+\node[font=\sffamily\bfseries,text=baseBlue!85!black] at (3.8,0.15) {(a) Host-controlled staged enrollment};
+\node[font=\sffamily\bfseries,text=baseOrange!80!black] at (12.0,0.15) {(b) Device-managed enrollment};
+\draw[baseGray!30] (8,-0.35) -- (8,-6.42);
+\node[state] (si) at (3.1,-0.70) {Idle};
+\node[state,staged] (sc) at (3.1,-2.20) {Capturing\\$0\leq k<N$};
+\node[state,staged] (sr) at (3.1,-4.00) {Ready\\$k=N$};
+\draw[stagedarrow] (si.south) -- node[lab,right=3pt]{start succeeds} (sc.north);
+\draw[stagedarrow] (sc.south) -- node[lab,right=3pt]{final capture\\succeeds} (sr.north);
+\draw[stagedarrow] ([yshift=-1.5mm]sc.east) -- (6.8,-2.35) -- (6.8,-2.05) -- ([yshift=1.5mm]sc.east);
+\node[lab,text width=2.2cm] at (6.40,-2.88) {capture succeeds;\\$k\gets k+1$ ($<N$)};
+\draw[stagedarrow] (sr.west) -- (0.90,-4.00) -- (0.90,-0.70) -- (si.west);
+\node[lab,rotate=90] at (0.48,-2.50) {finalize succeeds};
+\node[align=left,text width=6.9cm,font=\sffamily\footnotesize] at (3.8,-5.72) {Successful progress is shown. Abort resets host state; capture failures may preserve or discard progress depending on the driver. Ready is a logical state, not a universal storage boundary.};
+\node[state] (ai) at (11.1,-0.70) {Idle};
+\node[state,managed] (aa) at (11.1,-2.20) {Active\\Device owns capture};
+\node[state,managed] (ac) at (11.1,-3.73) {Protocol cleanup};
+\node[state,managed] (as) at (11.1,-5.08) {Terminal callback\\\texttt{STOPPED}; still busy};
+\draw[managedarrow] (ai.south) -- node[lab,right=3pt]{request\\accepted} (aa.north);
+\draw[managedarrow] (aa.south) -- node[lab,right=3pt]{completion, failure,\\or cancellation} (ac.north);
+\draw[managedarrow] (ac.south) -- node[lab,right=3pt]{\texttt{ERROR} if needed} (as.north);
+\draw[managedarrow] (as.west) -- (8.95,-5.08) -- (8.95,-0.70) -- (ai.west);
+\node[lab,rotate=90] at (8.52,-3.18) {callback returns; release activity};
+\node[lab,align=left,text width=2.35cm] at (14.72,-1.78) {Success emits\\\texttt{ENROLL\_\allowbreak{}}\texttt{COMPLETE}\\with ID and modality\\before cleanup.};
+\node[align=left,text width=6.9cm,font=\sffamily\footnotesize] at (12,-6.17) {A stored template can survive cancellation or cleanup failure. The device is available only after the terminal callback returns.};
+\end{tikzpicture}%
+}
+\caption{Enrollment models. Panel (a) abstracts successful staged progress, with driver-specific error recovery. Panel (b) shows the host lifecycle for device-managed enrollment; the module owns acquisition and storage. Neither panel treats cancellation as rollback.}
+\label{fig:fsm}
+\end{figure*}
+
+\subsubsection{Device-Managed Enrollment}
+
+\texttt{biometric\_\allowbreak{}enroll\_\allowbreak{}async()} delegates capture and storage to the module. A successful call confirms acceptance; \texttt{ENROLL\_\allowbreak{}COMPLETE} subsequently reports a successful enrollment's stored identifier and modality. Cleanup and terminal delivery conclude the host operation (Figure~\ref{fig:fsm}(b)); the internal capture count need not be exposed.
+
+The interface accepts an identifier or \texttt{BIOMETRIC\_\allowbreak{}ID\_\allowbreak{}AUTO} for device allocation. AI10 supports automatic allocation only, advertises zero staged samples and asynchronous enrollment, and supplies no staged handlers. Stopping controls execution subject to the persistence semantics in Section~\ref{sec:correctness_properties}.
+
+\subsection{Asynchronous Lifecycle and Concurrency}
+\label{sec:interrupt_io}
+
+\subsubsection{Acceptance, Results, and Termination}
+
+Request acceptance, biometric outcomes, terminal notification, and release of device activity are separate boundaries (Figure~\ref{fig:async_lifecycle}). Callback registration occurs while idle and persists across operations. Callback-visible state must be initialized before submission because callbacks may begin before the initiating call returns.
+
+Matching emits \texttt{MATCH} or \texttt{NO\_\allowbreak{}MATCH} per attempt; successful enrollment emits \texttt{ENROLL\_\allowbreak{}COMPLETE}. An unsuccessful attempt need not end continuous recognition. Operation or cleanup failures produce \texttt{ERROR}; \texttt{STOPPED} terminates the lifecycle. Effective cancellation may emit \texttt{STOPPED} with \texttt{-ECANCELED} without an additional error event.
+
+Outcome and lifecycle status differ: \texttt{NO\_\allowbreak{}MATCH} can precede \texttt{STOPPED}(0) after normal completion, while successful enrollment can precede cleanup failure, \texttt{ERROR}, and a failing \texttt{STOPPED}. Table~\ref{tab:lifecycle_contract} assigns driver and application obligations.
+
+\begin{figure*}[t]
+\centering
+\definecolor{baseGray}{HTML}{666666}
+\definecolor{baseBlue}{HTML}{0072B2}
+\definecolor{baseOrange}{HTML}{D55E00}
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    x=1cm,y=1cm,font=\sffamily\footnotesize,
+    arrow/.style={-{Stealth[length=1.6mm]},draw=baseGray!85!black,line width=0.65pt},
+    ret/.style={arrow,dashed},
+    completion/.style={draw=baseBlue},
+    cancellation/.style={draw=baseOrange},
+    msg/.style={midway,above,fill=white,inner sep=1pt,align=center},
+    head/.style={draw=baseGray,fill=baseGray!7,rounded corners=1pt,line width=0.6pt,text width=3.5cm,align=center,minimum height=0.55cm}
+]
+\node[head] (app) at (2.2,0) {\textbf{Application interface}};
+\node[head,draw=baseOrange,fill=baseOrange!8] (worker) at (8,0) {\textbf{Biometric driver}};
+\node[head,draw=baseOrange!75!black,fill=baseOrange!3] (module) at (13.8,0) {\textbf{Biometric module}};
+\coordinate (lifeline end) at (0,-8.20);
+\foreach \actor in {app,worker,module}{
+    \draw[densely dashed,baseGray!50] (\actor.south) -- (lifeline end -| \actor.south);
+}
+\draw[arrow] (2.2,-0.85) -- node[msg]{\texttt{match\_async} / \texttt{enroll\_async}} (8,-0.85);
+\draw[ret] (8,-1.28) -- node[msg]{return 0: accepted, not completed} (2.2,-1.28);
+\draw[arrow] (8,-1.71) -- node[msg]{protocol setup and operation command} (13.8,-1.71);
+\draw[baseGray!75,line width=0.6pt] (0.16,-1.98) rectangle (15.84,-8.30);
+\node[anchor=north west,fill=baseBlue!8,text=baseBlue!85!black,inner sep=3pt] at (0.16,-1.98) {\textbf{Completion path} (one successful attempt)};
+\draw[ret,completion] (13.8,-2.75) -- node[msg]{successful result} (8,-2.75);
+\draw[arrow,completion] (8,-3.20) -- node[msg]{\texttt{MATCH} or \texttt{ENROLL\_COMPLETE}} (2.2,-3.20);
+\draw[arrow,completion] (8,-3.65) -- node[msg]{protocol cleanup} (13.8,-3.65);
+\draw[ret,completion] (13.8,-4.10) -- node[msg]{cleanup acknowledgment} (8,-4.10);
+\draw[arrow,completion] (8,-4.55) -- node[msg]{\texttt{STOPPED}(0); device still busy} (2.2,-4.55);
+\node[anchor=west,fill=white,text=baseBlue!85!black,inner sep=1.5pt] at (8.16,-4.88) {Callback returns; mark idle.};
+\draw[dashed,baseGray!75] (0.16,-5.18) -- (15.84,-5.18);
+\node[anchor=north west,fill=baseOrange!8,text=baseOrange!80!black,inner sep=3pt] at (0.16,-5.18) {\textbf{Cancellation path} (cancellation takes effect)};
+\draw[arrow,cancellation] (2.2,-5.95) -- node[msg]{\texttt{async\_stop}; caller waits} (8,-5.95);
+\draw[arrow,cancellation] (8,-6.40) -- node[msg]{interrupt wait; protocol cleanup} (13.8,-6.40);
+\draw[ret,cancellation] (13.8,-6.85) -- node[msg]{cleanup acknowledgment} (8,-6.85);
+\draw[arrow,cancellation] (8,-7.30) -- node[msg]{\texttt{STOPPED}(-\texttt{ECANCELED}); still busy} (2.2,-7.30);
+\node[anchor=west,fill=white,text=baseOrange!80!black,inner sep=1.5pt] at (8.16,-7.64) {Callback returns; mark idle; wake stopper.};
+\draw[ret,cancellation] (8,-8.10) -- node[msg]{\texttt{async\_stop} returns 0 after cleanup} (2.2,-8.10);
+\end{tikzpicture}%
+}
+\caption{Illustrative BASE asynchronous sequences with a callback registered while idle. The two paths are alternatives; protocol exchanges are schematic. Callbacks execute in driver-thread context, and activity remains reserved through terminal callback return. Cleanup failure emits \texttt{ERROR} before \texttt{STOPPED}; a completion that wins the cancellation race is preserved. Worker execution and callbacks may begin before the initiating call returns.}
+\label{fig:async_lifecycle}
+\end{figure*}
+
+\begin{table*}[!t]
+\centering
+\caption{Asynchronous lifecycle contract.}
+\label{tab:lifecycle_contract}
+\small
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\textwidth}{|>{\raggedright\arraybackslash}p{0.18\textwidth}|>{\raggedright\arraybackslash}X|>{\raggedright\arraybackslash}X|}
+\hline
+\textbf{Concern} & \textbf{Driver obligation} & \textbf{Application obligation} \\ \hline
+Admission & Accept supported requests with a registered callback; reject conflicting operations. & Check the return value; initialize callback-visible state before submission. \\ \hline
+Event delivery & Deliver ordered events in driver-thread context with the appropriate discriminator. & Use the valid payload; copy required data before the callback returns. \\ \hline
+Callback lifetime & Keep device activity reserved through the terminal callback. & Return promptly; avoid same-device control and database calls from callbacks. \\ \hline
+Termination & Deliver one terminal \texttt{STOPPED} under the stated progress assumptions; report operation and cleanup failures. & Distinguish attempt outcomes, enrollment completion, and terminal status. \\ \hline
+Stop & Wait for callbacks and cleanup; retain a completion that wins the cancellation race. & Inspect stop errors; account for persistent changes already made by the module. Serialize ownership and coordinate pending stop calls before handoff. \\ \hline
+Registration & Replace or unregister callbacks only while idle. & Keep \texttt{user\_\allowbreak{}data} valid until successful replacement or unregistration. \\ \hline
+\end{tabularx}
+\end{table*}
+
+\subsubsection{Execution Context and Access Coordination}
+
+Callbacks execute in driver-thread context. Event objects remain valid only until callback return. Callbacks may copy outcomes and notify another thread, but must not invoke same-device control or database operations. Device activity remains reserved through cleanup and terminal callback return, so a thread notified by \texttt{STOPPED} can still encounter a busy device.
+
+For staged enrollment, per-call mutex protection does not establish ownership of the whole workflow. The API provides no session token; applications sharing a device must serialize the complete session, including recovery.
+
+\subsubsection{Stop and Recovery}
+
+\texttt{biometric\_\allowbreak{}async\_\allowbreak{}stop()} requests cancellation of the operation active when the driver checks device activity and waits for that operation's callbacks to finish. Stop is device-scoped and carries no request token: if operation A finishes and operation B starts before A's caller invokes stop, the call can affect B. Applications must therefore serialize operation ownership and coordinate pending stop calls before handoff. A zero return reports successful cleanup after callback completion. Effective cancellation produces terminal status \texttt{-ECANCELED}; a completion that wins the race retains its outcome.
+
+Cleanup failure is reported to the caller and through events. Host-side idle then means execution has ended, although communication may still require recovery; a subsequent operation must re-establish its protocol boundary. For drivers supporting asynchronous stop, an otherwise valid stop call returns \texttt{-EALREADY} when no asynchronous operation is active.
+
+\subsection{Correctness Properties and Verification Boundary}
+\label{sec:correctness_properties}
+
+Staged readiness addresses RQ1; terminal delivery, conflicting-operation exclusion, and callback quiescence define the RQ2 obligations. Source inspection examines their implementation, and directed tests examine selected executions (Section~\ref{sec:evaluation}).
+
+\paragraph{Staged readiness}
+For a serialized session, start establishes $C_0$, each successful capture advances once, and finalization requires $C_N$. Readiness thus requires $N$ successful stage advances. The fingerprint drivers enforce this host-progress guard; persistence follows the device mapping.
+
+\paragraph{Terminal-event uniqueness and progress}
+Let $E_o$ be the callback-event sequence for an accepted operation $o$, an analytical identifier rather than an API token. With $N_{\mathrm{STOPPED}}$ counting terminal events, every prefix $E'_o$ of this sequence must satisfy
+\begin{equation}
+N_{\mathrm{STOPPED}}(E'_o) \leq 1.
+\end{equation}
+Eventual equality to one additionally requires worker scheduling, returning callbacks, terminating or cancelled protocol waits, and eventual stop or failure of a continuous operation. Otherwise, continuous recognition may remain active indefinitely. AI10 delivers its terminal event from a single worker epilogue after cleanup.
+
+\paragraph{Conflicting-operation exclusion}
+From acceptance through terminal callback return, device activity excludes conflicting starts, database operations, and callback replacement. Stop remains available to an eligible application thread. AI10 enforces this interval through its control lock and activity state.
+
+\paragraph{Callback quiescence after stop}
+For the operation targeted by a successful stop, let $t_{\mathrm{last}}$ be its last callback return and $t_{\mathrm{stop}}$ the stop return. The required ordering is
+\begin{equation}
+t_{\mathrm{last}} \leq t_{\mathrm{stop}}.
+\end{equation}
+AI10 signals completion after terminal callback return. Successful stop therefore establishes quiescence for that operation, without excluding callbacks from later operations started by another thread.
+
+\paragraph{Persistence and cancellation}
+Enrollment completion reports module-acknowledged storage, which later cancellation or cleanup failure does not reverse. An interrupted exchange can leave storage uncertain: absence of a success event does not establish absence of a persistent change. Reconciliation requires available inventory operations and device-specific recovery.
+
+These properties specify host-side obligations, with directed tests covering the exercised schedules. Module firmware correctness and persistence under power loss remain outside this analysis.
+
+\subsection{Configuration, Trust, and Timing Boundaries}
+\label{sec:threat_model}
+
+Common attributes expose thresholds, quality settings, security levels, timeouts, and other policies where supported. Their interpretation remains device-dependent: the 1--10 security convention does not imply equivalent false-accept rates. Unsupported settings are rejected, while private attributes require device-specific knowledge.
+
+BASE assumes a functioning RTOS, trusted drivers, and callbacks obeying their contract. Authorization, template protection, firmware trust, and transport authenticity require separate mechanisms. Protocol checksums detect transmission errors but do not authenticate results.
+
+Most public operations carry Zephyr syscall annotations; callback registration remains supervisor-only. Privilege isolation additionally requires syscall verification, device permissions, and trusted event delivery. The abstraction alone establishes neither that isolation nor physical module protection.
+
+Elapsed time includes locking, startup, protocol exchanges, cleanup, and callbacks. AI10's asynchronous timeout applies to an attempt or enrollment request; it does not bound continuous recognition or provide a caller-specified stop deadline. Section~\ref{sec:evaluation} characterizes scheduling and memory costs for the implemented configurations.
+
+Porting to another RTOS requires adapted device dispatch, synchronization, timeouts, driver-thread execution, and event delivery, with corresponding privilege and scheduling analysis.

@@ -1,0 +1,120 @@
+\section{Related Work and Motivation}
+\label{sec:related_work}
+
+Biometric surveys examine recognition, template protection, and authentication security \cite{yang2021biometric,ahvanooey2022modern}. Here, we compare the host interfaces used to integrate biometric modules into an RTOS running on a microcontroller (MCU), focusing on capabilities, enrollment, outcomes, and operation lifetime.
+
+\subsection{Biometric Standards and Integration Frameworks}
+
+BioAPI defines cross-vendor application and service-provider interfaces \cite{iso19784}; Gonz\'{a}lez-Agulla et al. provide a Java Native Interface wrapper for Windows and Linux/Unix \cite{gonzalezagulla2009bioapi}. Embedded BioAPI specifies commands for constrained biometric modules while leaving low-level implementation outside its scope \cite{iso29164}. BASE maps heterogeneous module protocols into an RTOS driver contract without claiming conformance to either standard.
+
+Milovanovi\'{c} et al. demonstrate multimodal integration through adapters, capability discovery, component-state tracking, and sessions \cite{milovanovic2012interoperability}. Their Java framework integrates face, fingerprint, and voice, establishing precedents for capability-aware integration.
+
+\subsection{Linux and Android Biometric Interfaces}
+
+The fprint project separates device support in \texttt{libfprint} from application access through the \texttt{fprintd} D-Bus service~\cite{libfprint_device_api,fprintd_device_api}. The current libfprint \texttt{FpDevice} interface provides feature discovery, enrollment progress, device-storage operations, and synchronous and asynchronous execution \cite{libfprint_device_api}. Its matching callback can report an outcome before operation completion, and a subsequent failure can be reported at completion. Its asynchronous enrollment interface initiates one operation with progress and completion callbacks, accepting a \texttt{GCancellable} for cancellation. BASE adopts the established distinction between outcome and completion while exposing application-issued capture/finalize steps alongside device-managed enrollment. Its stop operation is device-scoped, so applications must coordinate ownership rather than associate cancellation with a request object.
+
+The fprintd service provides device claiming and requires \texttt{EnrollStop} after successful enrollment status, separating outcome delivery from completion~\cite{fprintd_device_api}. Android's \texttt{BiometricPrompt} provides system-mediated authentication with capability checks and outcome callbacks~\cite{android_bio}. BASE exposes RTOS module operations, including application-controlled enrollment where supported.
+
+\subsection{Biometric Integration in MCU RTOSs}
+
+\subsubsection{Module-Specific Packages and Vendor Frameworks}
+
+RT-Thread's \texttt{as608} package supports AS60x fingerprint modules through image acquisition, feature generation, template construction and storage, search, and enrollment helpers \cite{rtthread_as608}. It provides a module-family interface rather than a driver class shared across protocols and modalities.
+
+NXP's EdgeReady i.MX RT117F solution runs a face-recognition stack on FreeRTOS, with camera and algorithm managers, hardware abstraction layers, and a facial biometric API and runtime \cite{nxp_rt117f_face}. Its MCU executes vision processing, whereas BASE controls modules that perform acquisition and recognition internally.
+
+\subsubsection{Zephyr's Generic Sensor Interface}
+\label{sec:sensor_limitations}
+
+Zephyr's sensor subsystem provides channels, attributes, triggers, and blocking and non-blocking acquisition \cite{zephyr_sensor_api}. Its \texttt{grow\_r502a} driver and sample expose record addition, lookup, deletion, and free-index selection through sensor attributes, with a touch trigger for enrollment and matching results containing an identifier and confidence \cite{zephyr_r502a,zephyr_r502a_sample}.
+
+This provides working biometric integration, but applications depend on the driver-specific public definitions in \texttt{grow\_r502a.h} and must interpret the biometric meanings assigned to its sensor attributes and values \cite{zephyr_r502a}. A dedicated biometric contract makes enrollment progress, template identifiers, modalities, and outcomes explicit across drivers. It must also describe who controls acquisition and how host-visible progress relates to device storage, since shared acquisition mechanisms alone do not define those semantics.
+
+\subsection{Operation Lifetime and RTOS Concurrency}
+
+The nesC/TinyOS model separates initiation from completion through split-phase commands and events \cite{gay2003nesc}; biometric frameworks likewise provide asynchronous operations. Sethi et al. document cancellation requirements and failures in concurrent and distributed systems \cite{sethi2022cancellation}. For enrollment, cancellation must account for stored templates, outcomes already delivered, outstanding callbacks, and subsequent device access.
+
+Execution mode alone also does not determine scheduling interference: synchronous calls may suspend their callers, while asynchronous workers consume CPU time when runnable. Zephyr's scheduling and synchronization mechanisms govern their interaction with other tasks \cite{zephyr_docs}, motivating measurements under stated priorities and workloads.
+
+\subsection{Architectural Positioning and Requirements}
+
+Table~\ref{tab:gap_matrix} positions BASE as a unified RTOS biometric driver class. Capability discovery, typed interfaces, and asynchronous completion have established precedents. BASE integrates these mechanisms across heterogeneous enrollment and storage behaviors: capabilities select workflows, drivers enforce state, typed results support shared application logic, and lifecycle rules govern cancellation and reuse. The contribution comprises this integrated contract, three device-family mappings, and an evaluated Zephyr implementation.
+
+\begin{table*}[!t]
+\centering
+\caption{Architectural comparison of the reviewed biometric interfaces and implementations.}
+\label{tab:gap_matrix}
+\small
+\renewcommand{\arraystretch}{1.18}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\textwidth}{|>{\raggedright\arraybackslash}p{0.16\textwidth}|*{3}{>{\raggedright\arraybackslash}X|}}
+\hline
+\textbf{Approach} &
+\textbf{Interface and device scope} &
+\textbf{Workflow and lifecycle abstraction} &
+\textbf{Implementation setting} \\
+\hline
+BioAPI \cite{iso19784} &
+Standard application and service-provider interfaces across vendors &
+Common service operations; framework-based or framework-free integration &
+Platform-specific implementation of a standard \\
+\hline
+Embedded BioAPI \cite{iso29164} &
+Command interface for constrained biometric modules &
+Commands implemented by conforming modules &
+Embedded systems; low-level implementation outside scope \\
+\hline
+Multimodal framework \cite{milovanovic2012interoperability} &
+Adapters for biometric software, devices, and databases &
+Functionality discovery, component states, and sessions &
+Java implementation: face, fingerprint, and voice \\
+\hline
+libfprint / fprintd \cite{libfprint_device_api,fprintd_device_api} &
+Fingerprint device library and D-Bus service &
+Enrollment progress, separate matching outcome and completion, cancellation; service-level device claiming &
+Linux userspace library and service \\
+\hline
+Android biometrics \cite{android_bio} &
+Application authentication framework &
+Capability checks, system-mediated authentication, and outcome callbacks &
+Android platform services \\
+\hline
+RT-Thread \texttt{as608} \cite{rtthread_as608} &
+AS60x fingerprint module-family interface &
+Capture, template construction and storage, search, and enrollment helpers &
+RT-Thread peripheral package \\
+\hline
+NXP EdgeReady i.MX RT117F \cite{nxp_rt117f_face} &
+Vendor facial biometric API and runtime &
+Camera/algorithm managers and hardware abstraction; cancellation not detailed in cited fact sheet &
+MCU vision-processing stack on FreeRTOS \\
+\hline
+Zephyr \texttt{grow\_\allowbreak{}r502a} \cite{zephyr_r502a_sample} &
+Fingerprint operations through the sensor interface &
+Record attributes, matching results, and touch trigger &
+Device-specific RTOS sensor driver and sample \\
+\hline
+\textbf{BASE} &
+Biometric driver contract; fingerprint, face, and palm drivers &
+Capability-aware staged/device-managed enrollment; terminal-event and callback-quiescence obligations &
+Zephyr driver class; driver-specific state and execution \\
+\hline
+\end{tabularx}
+
+\par\smallskip
+\begin{minipage}{\textwidth}
+\footnotesize
+\textit{Scope:} Entries summarize the cited interfaces; undocumented properties are left unspecified.
+\end{minipage}
+\end{table*}
+
+The comparison motivates five requirements:
+\begin{enumerate}
+\item \textbf{Explicit biometric semantics:} shared capabilities, identifiers, enrollment progress, modalities, and outcomes.
+\item \textbf{Capability-aware portability:} workflow discovery and defined errors for absent operations or unsupported parameters.
+\item \textbf{Heterogeneous enrollment ownership:} staged and device-managed acquisition, with progress distinguished from storage.
+\item \textbf{Defined operation lifetimes:} acceptance, outcomes, termination, callback context and quiescence, cancellation, and conflicting access.
+\item \textbf{Accountable RTOS resource use:} execution behavior, scheduling effects, memory costs, and observed stack usage under stated configurations.
+\end{enumerate}
+
+Requirements~1--3 address RQ1, Requirement~4 addresses RQ2, and Requirement~5 addresses RQ3--RQ4. Section~\ref{sec:architecture} develops the contract and assigns responsibilities.

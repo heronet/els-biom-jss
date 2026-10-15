@@ -1,0 +1,24 @@
+\section{Introduction}
+\label{sec:introduction}
+
+Biometric modules differ not only in protocol but in who controls enrollment and when a template is stored, so an application written for one module rarely works with another. A common biometric driver class can encapsulate these differences while applications share enrollment, matching, and template-management logic. In a resource-constrained real-time operating system (RTOS), this interface must also coexist with sensing, communication, and control. This systems problem complements research on recognition, template protection, and authentication security~\cite{yang2021biometric,ahvanooey2022modern}.
+
+BioAPI and Embedded BioAPI define common biometric interfaces~\cite{iso19784,iso29164}, while libfprint and fprintd provide a fingerprint-device interface in Linux userspace~\cite{libfprint_device_api,fprintd_device_api}. Zephyr's \texttt{grow\_r502a} instead exposes biometric operations through sensor attributes and \texttt{sensor\_value} fields~\cite{zephyr_sensor_api,zephyr_r502a}. BASE targets a dedicated RTOS driver class with shared enrollment, matching, and termination semantics across host-staged and device-managed modules.
+
+Some modules require host-controlled capture stages; others manage acquisition and storage internally. Even staged devices may store templates during the final capture or a later finalization command, so a common call sequence cannot imply a common persistence boundary.
+
+Split-phase interfaces separate initiation from completion~\cite{gay2003nesc}, while cancellation can introduce concurrency errors~\cite{sethi2022cancellation}. Biometric interfaces must distinguish outcomes, terminal notification, and device release: enrollment may succeed before cleanup, and cancellation need not reverse storage. These boundaries determine callback lifetime and safe device reuse.
+
+We present the \emph{Biometric Abstraction for Secure Edge} (BASE), a unified biometric driver class whose core is integrated into Zephyr mainline~\cite{zephyr_biometrics}; the evaluated multimodal and asynchronous extensions are under upstream review~\cite{zephyr_pr2}. BASE combines capability discovery, typed operations and results, and explicit lifecycle rules. Applications select supported workflows; drivers translate protocols and enforce state. The architecture separates application policy, the subsystem contract, and device-specific execution. Portability concerns shared workflows and operation semantics; biometric fusion, template-format interoperability, and score calibration remain outside its scope.
+
+We investigate four research questions. \textbf{RQ1:} How can a common RTOS biometric contract accommodate differences in capabilities, enrollment ownership, and storage? \textbf{RQ2:} Does the asynchronous implementation satisfy termination, conflicting-operation exclusion, and callback-quiescence obligations in directed tests? \textbf{RQ3:} How do driver implementation, operating mode, priority, and background load affect a concurrent periodic task's response times? \textbf{RQ4:} What linked ROM and RAM costs and observed stack usage do the implementations incur?
+
+The contributions are:
+\begin{itemize}
+    \item \textbf{A unified RTOS biometric driver class} combining capability-dependent workflows, typed results, and driver-enforced state.
+    \item \textbf{Explicit lifecycle semantics} for enrollment, persistence, cancellation, and callback lifetime, including cancellation that does not assume rollback of a stored template.
+    \item \textbf{Three heterogeneous device mappings.} ZFM-X0 and GT-5X fingerprint drivers and an AI10 face/palm driver preserve distinct enrollment, storage, and recovery behavior.
+    \item \textbf{An ESP32-S3 evaluation} of application reuse, functional coverage, lifecycle behavior, scheduling interference, linked memory, source-derived heap allocation requests, and observed stack usage.
+\end{itemize}
+
+The architecture and driver mappings address RQ1, supported by E1; E2--E4 address RQ2--RQ4. Section~\ref{sec:related_work} reviews related work; Sections~\ref{sec:architecture} and~\ref{sec:implementation} describe BASE; Section~\ref{sec:evaluation} evaluates it; and Section~\ref{sec:conclusion} concludes.
